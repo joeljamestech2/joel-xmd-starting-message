@@ -1,14 +1,16 @@
 
 const CREATOR = "API Developer";
 
-const GITHUB_OWNER = process.env.GITHUB_OWNER;
-const GITHUB_REPO = process.env.GITHUB_REPO;
-const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
-const GITHUB_BRANCH = process.env.GITHUB_BRANCH || "main";
+const CREATOR = "API Developer";
+
+// GITHUB CONFIGURATION
+const GITHUB_OWNER = "joeljamestech";
+const GITHUB_REPO = "joel-xmd-starting-message";
+const GITHUB_TOKEN = "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";
+const GITHUB_BRANCH = "main";
+
 const GITHUB_FILE = "data/numbers.json";
-
 const API_URL = "https://api.github.com";
-
 function cleanNumber(value) {
     return String(value || "").replace(/[+\s()-]/g, "");
 }
