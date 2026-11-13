@@ -1,9 +1,8 @@
 {
-  "name": "whatsapp-number-api",
-  "version": "3.0.0",
-  "description": "GitHub JSON Number Storage API",
+  "name": "whatsapp-number-storage",
+  "version": "1.0.0",
   "main": "api/index.js",
-  "scripts": {
-    "start": "node api/index.js"
+  "dependencies": {
+    "megajs": "^1.3.10"
   }
 }
