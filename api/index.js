@@ -1,5 +1,4 @@
 
-const CREATOR = "API Developer";
 
 const CREATOR = "API Developer";
 
