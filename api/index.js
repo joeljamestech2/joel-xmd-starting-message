@@ -1,49 +1,66 @@
-const express = require("express");
-const { neon } = require("@neondatabase/serverless");
+import express from "express";
+import { put, list, del } from "@vercel/blob";
 
 const app = express();
 
 const CREATOR = "API Developer";
+const PREFIX = "saved-numbers/";
 
 app.use(express.json());
 
-function getDB() {
-    if (!process.env.DATABASE_URL) {
-        throw new Error("PostgreSQL database is not connected.");
-    }
-
-    return neon(process.env.DATABASE_URL);
-}
-
+// CLEAN PHONE NUMBER
 function cleanNumber(value) {
     return String(value || "").replace(/[+\s()-]/g, "");
 }
 
+// VALIDATE PHONE NUMBER
 function validNumber(number) {
     return /^\d{8,15}$/.test(number);
 }
 
-// INITIALIZE DATABASE
-async function initializeDatabase() {
-    const sql = getDB();
+// GET ALL SAVED NUMBERS
+async function getAllNumbers() {
+    let cursor;
+    let hasMore = true;
+    const numbers = [];
 
-    await sql`
-        CREATE TABLE IF NOT EXISTS saved_numbers (
-            id BIGSERIAL PRIMARY KEY,
-            phone_number VARCHAR(15) UNIQUE NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    `;
+    while (hasMore) {
+        const result = await list({
+            prefix: PREFIX,
+            limit: 1000,
+            cursor,
+            mode: "expanded"
+        });
+
+        for (const blob of result.blobs) {
+            const match = blob.pathname.match(
+                /^saved-numbers\/(\d+)\.json$/
+            );
+
+            if (match) {
+                numbers.push({
+                    number: match[1],
+                    url: blob.url,
+                    uploadedAt: blob.uploadedAt
+                });
+            }
+        }
+
+        hasMore = result.hasMore;
+        cursor = result.cursor;
+    }
+
+    return numbers;
 }
 
-// HOME - ALL ENDPOINTS
-app.get("/", async (req, res) => {
+// HOME - VIEW ALL ENDPOINTS
+app.get("/", (req, res) => {
     res.status(200).json({
         status: true,
         statusCode: 200,
         creator: CREATOR,
         name: "WhatsApp Number Storage API",
-        description: "Permanent Phone Number Storage API",
+        description: "Permanent WhatsApp Number Storage",
         endpoints: {
             upload: {
                 method: "GET",
@@ -60,6 +77,10 @@ app.get("/", async (req, res) => {
             delete: {
                 method: "DELETE",
                 url: "/api/numbers?number=255712345678"
+            },
+            dashboard: {
+                method: "GET",
+                url: "/dashboard"
             }
         }
     });
@@ -74,35 +95,57 @@ app.get("/api/upload", async (req, res) => {
             status: false,
             statusCode: 400,
             creator: CREATOR,
-            message: "Valid phone number required."
+            message: "Valid phone number required.",
+            example: "/api/upload?number=255714595078"
         });
     }
 
     try {
-        await initializeDatabase();
+        const existing = await list({
+            prefix: `${PREFIX}${number}.json`,
+            limit: 10
+        });
 
-        const sql = getDB();
+        const alreadyExists = existing.blobs.some(
+            blob => blob.pathname === `${PREFIX}${number}.json`
+        );
 
-        const result = await sql`
-            INSERT INTO saved_numbers (phone_number)
-            VALUES (${number})
-            ON CONFLICT (phone_number) DO NOTHING
-            RETURNING phone_number
-        `;
+        if (alreadyExists) {
+            return res.status(200).json({
+                status: true,
+                statusCode: 200,
+                creator: CREATOR,
+                number,
+                saved: false,
+                message: "Number already exists."
+            });
+        }
 
-        res.status(200).json({
+        await put(
+            `${PREFIX}${number}.json`,
+            JSON.stringify({
+                number,
+                createdAt: new Date().toISOString()
+            }),
+            {
+                access: "private",
+                addRandomSuffix: false,
+                allowOverwrite: false,
+                contentType: "application/json"
+            }
+        );
+
+        return res.status(200).json({
             status: true,
             statusCode: 200,
             creator: CREATOR,
             number,
-            saved: result.length > 0,
-            message: result.length > 0
-                ? "Number saved successfully."
-                : "Number already exists."
+            saved: true,
+            message: "Number saved successfully."
         });
 
     } catch (error) {
-        res.status(500).json({
+        return res.status(500).json({
             status: false,
             statusCode: 500,
             creator: CREATOR,
@@ -112,13 +155,9 @@ app.get("/api/upload", async (req, res) => {
     }
 });
 
-// RETRIEVE / CHECK NUMBERS
+// RETRIEVE ALL NUMBERS OR CHECK NUMBER
 app.get("/api/numbers", async (req, res) => {
     try {
-        await initializeDatabase();
-
-        const sql = getDB();
-
         // CHECK NUMBER
         if (req.query.number !== undefined) {
             const number = cleanNumber(req.query.number);
@@ -132,14 +171,14 @@ app.get("/api/numbers", async (req, res) => {
                 });
             }
 
-            const result = await sql`
-                SELECT phone_number
-                FROM saved_numbers
-                WHERE phone_number = ${number}
-                LIMIT 1
-            `;
+            const result = await list({
+                prefix: `${PREFIX}${number}.json`,
+                limit: 10
+            });
 
-            const exists = result.length > 0;
+            const exists = result.blobs.some(
+                blob => blob.pathname === `${PREFIX}${number}.json`
+            );
 
             return res.status(200).json({
                 status: true,
@@ -154,22 +193,18 @@ app.get("/api/numbers", async (req, res) => {
         }
 
         // RETRIEVE ALL NUMBERS
-        const numbers = await sql`
-            SELECT phone_number, created_at
-            FROM saved_numbers
-            ORDER BY created_at DESC
-        `;
+        const numbers = await getAllNumbers();
 
         return res.status(200).json({
             status: true,
             statusCode: 200,
             creator: CREATOR,
             total: numbers.length,
-            numbers: numbers.map(item => item.phone_number)
+            numbers: numbers.map(item => item.number)
         });
 
     } catch (error) {
-        res.status(500).json({
+        return res.status(500).json({
             status: false,
             statusCode: 500,
             creator: CREATOR,
@@ -193,37 +228,119 @@ app.delete("/api/numbers", async (req, res) => {
     }
 
     try {
-        await initializeDatabase();
+        const result = await list({
+            prefix: `${PREFIX}${number}.json`,
+            limit: 10
+        });
 
-        const sql = getDB();
+        const blob = result.blobs.find(
+            item => item.pathname === `${PREFIX}${number}.json`
+        );
 
-        const result = await sql`
-            DELETE FROM saved_numbers
-            WHERE phone_number = ${number}
-            RETURNING phone_number
-        `;
+        if (!blob) {
+            return res.status(200).json({
+                status: true,
+                statusCode: 200,
+                creator: CREATOR,
+                number,
+                deleted: false,
+                message: "Number not found."
+            });
+        }
 
-        const deleted = result.length > 0;
+        await del(blob.url);
 
-        res.status(200).json({
+        return res.status(200).json({
             status: true,
             statusCode: 200,
             creator: CREATOR,
             number,
-            deleted,
-            message: deleted
-                ? "Number deleted successfully."
-                : "Number not found."
+            deleted: true,
+            message: "Number deleted successfully."
         });
 
     } catch (error) {
-        res.status(500).json({
+        return res.status(500).json({
             status: false,
             statusCode: 500,
             creator: CREATOR,
             message: "Failed to delete number.",
             error: error.message
         });
+    }
+});
+
+// SAVED NUMBERS DASHBOARD
+app.get("/dashboard", async (req, res) => {
+    try {
+        const numbers = await getAllNumbers();
+
+        const rows = numbers.map(item => `
+            <tr>
+                <td>${item.number}</td>
+                <td>WhatsApp-compatible format</td>
+            </tr>
+        `).join("");
+
+        res.send(`
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>Saved Numbers</title>
+                <meta name="viewport" content="width=device-width, initial-scale=1">
+                <style>
+                    body {
+                        font-family: Arial;
+                        background: #101820;
+                        color: white;
+                        padding: 20px;
+                    }
+                    h1 { color: #25d366; }
+                    .card {
+                        background: #1c2935;
+                        padding: 20px;
+                        border-radius: 12px;
+                        margin-bottom: 20px;
+                    }
+                    table {
+                        width: 100%;
+                        border-collapse: collapse;
+                    }
+                    td, th {
+                        padding: 13px;
+                        border-bottom: 1px solid #34495e;
+                        text-align: left;
+                    }
+                    th { color: #25d366; }
+                </style>
+            </head>
+            <body>
+                <h1>Saved Numbers</h1>
+
+                <div class="card">
+                    <h2>Total: ${numbers.length}</h2>
+                    <p>WhatsApp Number Storage API</p>
+                </div>
+
+                <div class="card">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Phone Number</th>
+                                <th>Format</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${rows || "<tr><td colspan='2'>No numbers saved.</td></tr>"}
+                        </tbody>
+                    </table>
+                </div>
+            </body>
+            </html>
+        `);
+
+    } catch (error) {
+        res.status(500).send("Failed to load saved numbers.");
     }
 });
 
@@ -238,4 +355,5 @@ app.use("/api", (req, res) => {
     });
 });
 
-module.exports = app;
+// EXPORT
+export default app;
