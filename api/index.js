@@ -1,359 +1,363 @@
-import express from "express";
-import { put, list, del } from "@vercel/blob";
-
-const app = express();
-
 const CREATOR = "API Developer";
-const PREFIX = "saved-numbers/";
 
-app.use(express.json());
+const GITHUB_OWNER = process.env.GITHUB_OWNER;
+const GITHUB_REPO = process.env.GITHUB_REPO;
+const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
+const GITHUB_BRANCH = process.env.GITHUB_BRANCH || "main";
+const GITHUB_FILE = "data/numbers.json";
 
-// CLEAN PHONE NUMBER
+const API_URL = "https://api.github.com";
+
 function cleanNumber(value) {
     return String(value || "").replace(/[+\s()-]/g, "");
 }
 
-// VALIDATE PHONE NUMBER
 function validNumber(number) {
     return /^\d{8,15}$/.test(number);
 }
 
-// GET ALL SAVED NUMBERS
-async function getAllNumbers() {
-    let cursor;
-    let hasMore = true;
-    const numbers = [];
-
-    while (hasMore) {
-        const result = await list({
-            prefix: PREFIX,
-            limit: 1000,
-            cursor,
-            mode: "expanded"
-        });
-
-        for (const blob of result.blobs) {
-            const match = blob.pathname.match(
-                /^saved-numbers\/(\d+)\.json$/
-            );
-
-            if (match) {
-                numbers.push({
-                    number: match[1],
-                    url: blob.url,
-                    uploadedAt: blob.uploadedAt
-                });
-            }
-        }
-
-        hasMore = result.hasMore;
-        cursor = result.cursor;
+// GITHUB CONFIGURATION
+function checkConfig() {
+    if (!GITHUB_OWNER || !GITHUB_REPO || !GITHUB_TOKEN) {
+        throw new Error("GitHub storage configuration is incomplete.");
     }
-
-    return numbers;
 }
 
-// HOME - VIEW ALL ENDPOINTS
-app.get("/", (req, res) => {
-    res.status(200).json({
-        status: true,
-        statusCode: 200,
-        creator: CREATOR,
-        name: "WhatsApp Number Storage API",
-        description: "Permanent WhatsApp Number Storage",
-        endpoints: {
-            upload: {
-                method: "GET",
-                url: "/api/upload?number=255714595078"
-            },
-            retrieve: {
-                method: "GET",
-                url: "/api/numbers"
-            },
-            check: {
-                method: "GET",
-                url: "/api/numbers?number=255712345678"
-            },
-            delete: {
-                method: "DELETE",
-                url: "/api/numbers?number=255712345678"
-            },
-            dashboard: {
-                method: "GET",
-                url: "/dashboard"
-            }
+// GITHUB REQUEST
+async function githubRequest(url, options = {}) {
+    const response = await fetch(url, {
+        ...options,
+        headers: {
+            Authorization: `Bearer ${GITHUB_TOKEN}`,
+            Accept: "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+            "Content-Type": "application/json",
+            ...options.headers
         }
     });
-});
 
-// UPLOAD NUMBER
-app.get("/api/upload", async (req, res) => {
-    const number = cleanNumber(req.query.number);
+    const data = await response.json().catch(() => ({}));
 
-    if (!validNumber(number)) {
-        return res.status(400).json({
-            status: false,
-            statusCode: 400,
+    if (!response.ok) {
+        const error = new Error(
+            data.message || "GitHub storage request failed."
+        );
+
+        error.status = response.status;
+        throw error;
+    }
+
+    return data;
+}
+
+// FILE URL
+function getFileURL() {
+    const file = GITHUB_FILE
+        .split("/")
+        .map(encodeURIComponent)
+        .join("/");
+
+    return `${API_URL}/repos/${encodeURIComponent(GITHUB_OWNER)}/${encodeURIComponent(GITHUB_REPO)}/contents/${file}`;
+}
+
+// READ NUMBERS
+async function readNumbers() {
+    checkConfig();
+
+    try {
+        const url = `${getFileURL()}?ref=${encodeURIComponent(GITHUB_BRANCH)}`;
+
+        const file = await githubRequest(url);
+
+        const content = Buffer.from(
+            file.content.replace(/\s/g, ""),
+            "base64"
+        ).toString("utf8");
+
+        const numbers = JSON.parse(content);
+
+        if (!Array.isArray(numbers)) {
+            throw new Error("Invalid numbers storage format.");
+        }
+
+        return {
+            numbers,
+            sha: file.sha
+        };
+
+    } catch (error) {
+        if (error.status === 404) {
+            return {
+                numbers: [],
+                sha: null
+            };
+        }
+
+        throw error;
+    }
+}
+
+// WRITE NUMBERS
+async function writeNumbers(numbers, sha) {
+    checkConfig();
+
+    const content = Buffer.from(
+        JSON.stringify(numbers, null, 2)
+    ).toString("base64");
+
+    const body = {
+        message: "Update saved phone numbers",
+        content,
+        branch: GITHUB_BRANCH
+    };
+
+    if (sha) {
+        body.sha = sha;
+    }
+
+    return githubRequest(getFileURL(), {
+        method: "PUT",
+        body: JSON.stringify(body)
+    });
+}
+
+// UPDATE WITH CONFLICT RETRIES
+async function updateNumbers(callback) {
+    for (let attempt = 0; attempt < 5; attempt++) {
+        const { numbers, sha } = await readNumbers();
+
+        const result = callback(numbers);
+
+        if (!result.changed) {
+            return result.value;
+        }
+
+        try {
+            await writeNumbers(result.numbers, sha);
+            return result.value;
+
+        } catch (error) {
+            if (
+                (error.status === 409 || error.status === 422) &&
+                attempt < 4
+            ) {
+                continue;
+            }
+
+            throw error;
+        }
+    }
+
+    throw new Error("Unable to update number storage.");
+}
+
+// RESPONSE HELPER
+function sendError(res, message, error) {
+    return res.status(500).json({
+        status: false,
+        statusCode: 500,
+        creator: CREATOR,
+        message,
+        error: error.message
+    });
+}
+
+// MAIN HANDLER
+module.exports = async (req, res) => {
+    const url = new URL(req.url, "https://localhost");
+    const pathname = url.pathname;
+    const method = req.method;
+
+    // HOME
+    if (method === "GET" && pathname === "/") {
+        return res.status(200).json({
+            status: true,
+            statusCode: 200,
             creator: CREATOR,
-            message: "Valid phone number required.",
-            example: "/api/upload?number=255714595078"
+            name: "WhatsApp Number Storage API",
+            storage: "GitHub JSON",
+            endpoints: {
+                upload: {
+                    method: "GET",
+                    url: "/api/upload?number=255714595078"
+                },
+                retrieve: {
+                    method: "GET",
+                    url: "/api/numbers"
+                },
+                check: {
+                    method: "GET",
+                    url: "/api/numbers?number=255712345678"
+                },
+                delete: {
+                    method: "DELETE",
+                    url: "/api/numbers?number=255712345678"
+                }
+            }
         });
     }
 
-    try {
-        const existing = await list({
-            prefix: `${PREFIX}${number}.json`,
-            limit: 10
-        });
+    // UPLOAD NUMBER
+    if (
+        method === "GET" &&
+        (pathname === "/api/upload" || pathname === "/hapi/upload")
+    ) {
+        const number = cleanNumber(url.searchParams.get("number"));
 
-        const alreadyExists = existing.blobs.some(
-            blob => blob.pathname === `${PREFIX}${number}.json`
-        );
+        if (!validNumber(number)) {
+            return res.status(400).json({
+                status: false,
+                statusCode: 400,
+                creator: CREATOR,
+                message: "Valid phone number required."
+            });
+        }
 
-        if (alreadyExists) {
+        try {
+            const saved = await updateNumbers(numbers => {
+                if (numbers.includes(number)) {
+                    return {
+                        changed: false,
+                        value: false
+                    };
+                }
+
+                return {
+                    changed: true,
+                    numbers: [...numbers, number],
+                    value: true
+                };
+            });
+
             return res.status(200).json({
                 status: true,
                 statusCode: 200,
                 creator: CREATOR,
                 number,
-                saved: false,
-                message: "Number already exists."
+                saved,
+                message: saved
+                    ? "Number saved successfully."
+                    : "Number already exists."
             });
+
+        } catch (error) {
+            return sendError(
+                res,
+                "Failed to save number.",
+                error
+            );
         }
-
-        await put(
-            `${PREFIX}${number}.json`,
-            JSON.stringify({
-                number,
-                createdAt: new Date().toISOString()
-            }),
-            {
-                access: "private",
-                addRandomSuffix: false,
-                allowOverwrite: false,
-                contentType: "application/json"
-            }
-        );
-
-        return res.status(200).json({
-            status: true,
-            statusCode: 200,
-            creator: CREATOR,
-            number,
-            saved: true,
-            message: "Number saved successfully."
-        });
-
-    } catch (error) {
-        return res.status(500).json({
-            status: false,
-            statusCode: 500,
-            creator: CREATOR,
-            message: "Failed to save number.",
-            error: error.message
-        });
     }
-});
 
-// RETRIEVE ALL NUMBERS OR CHECK NUMBER
-app.get("/api/numbers", async (req, res) => {
-    try {
-        // CHECK NUMBER
-        if (req.query.number !== undefined) {
-            const number = cleanNumber(req.query.number);
+    // RETRIEVE OR CHECK NUMBERS
+    if (method === "GET" && pathname === "/api/numbers") {
+        try {
+            const { numbers } = await readNumbers();
 
-            if (!validNumber(number)) {
-                return res.status(400).json({
-                    status: false,
-                    statusCode: 400,
+            // CHECK NUMBER
+            if (url.searchParams.has("number")) {
+                const number = cleanNumber(
+                    url.searchParams.get("number")
+                );
+
+                if (!validNumber(number)) {
+                    return res.status(400).json({
+                        status: false,
+                        statusCode: 400,
+                        creator: CREATOR,
+                        message: "Invalid phone number."
+                    });
+                }
+
+                const exists = numbers.includes(number);
+
+                return res.status(200).json({
+                    status: true,
+                    statusCode: 200,
                     creator: CREATOR,
-                    message: "Invalid phone number."
+                    number,
+                    exists,
+                    message: exists
+                        ? "Number is saved."
+                        : "Number not found."
                 });
             }
 
-            const result = await list({
-                prefix: `${PREFIX}${number}.json`,
-                limit: 10
-            });
-
-            const exists = result.blobs.some(
-                blob => blob.pathname === `${PREFIX}${number}.json`
-            );
-
+            // RETRIEVE ALL NUMBERS
             return res.status(200).json({
                 status: true,
                 statusCode: 200,
                 creator: CREATOR,
-                number,
-                exists,
-                message: exists
-                    ? "Number is saved."
-                    : "Number not found."
+                total: numbers.length,
+                numbers
             });
+
+        } catch (error) {
+            return sendError(
+                res,
+                "Failed to retrieve numbers.",
+                error
+            );
         }
-
-        // RETRIEVE ALL NUMBERS
-        const numbers = await getAllNumbers();
-
-        return res.status(200).json({
-            status: true,
-            statusCode: 200,
-            creator: CREATOR,
-            total: numbers.length,
-            numbers: numbers.map(item => item.number)
-        });
-
-    } catch (error) {
-        return res.status(500).json({
-            status: false,
-            statusCode: 500,
-            creator: CREATOR,
-            message: "Failed to retrieve numbers.",
-            error: error.message
-        });
-    }
-});
-
-// DELETE NUMBER
-app.delete("/api/numbers", async (req, res) => {
-    const number = cleanNumber(req.query.number);
-
-    if (!validNumber(number)) {
-        return res.status(400).json({
-            status: false,
-            statusCode: 400,
-            creator: CREATOR,
-            message: "Valid phone number required."
-        });
     }
 
-    try {
-        const result = await list({
-            prefix: `${PREFIX}${number}.json`,
-            limit: 10
-        });
-
-        const blob = result.blobs.find(
-            item => item.pathname === `${PREFIX}${number}.json`
+    // DELETE NUMBER
+    if (method === "DELETE" && pathname === "/api/numbers") {
+        const number = cleanNumber(
+            url.searchParams.get("number")
         );
 
-        if (!blob) {
+        if (!validNumber(number)) {
+            return res.status(400).json({
+                status: false,
+                statusCode: 400,
+                creator: CREATOR,
+                message: "Valid phone number required."
+            });
+        }
+
+        try {
+            const deleted = await updateNumbers(numbers => {
+                if (!numbers.includes(number)) {
+                    return {
+                        changed: false,
+                        value: false
+                    };
+                }
+
+                return {
+                    changed: true,
+                    numbers: numbers.filter(n => n !== number),
+                    value: true
+                };
+            });
+
             return res.status(200).json({
                 status: true,
                 statusCode: 200,
                 creator: CREATOR,
                 number,
-                deleted: false,
-                message: "Number not found."
+                deleted,
+                message: deleted
+                    ? "Number deleted successfully."
+                    : "Number not found."
             });
+
+        } catch (error) {
+            return sendError(
+                res,
+                "Failed to delete number.",
+                error
+            );
         }
-
-        await del(blob.url);
-
-        return res.status(200).json({
-            status: true,
-            statusCode: 200,
-            creator: CREATOR,
-            number,
-            deleted: true,
-            message: "Number deleted successfully."
-        });
-
-    } catch (error) {
-        return res.status(500).json({
-            status: false,
-            statusCode: 500,
-            creator: CREATOR,
-            message: "Failed to delete number.",
-            error: error.message
-        });
     }
-});
 
-// SAVED NUMBERS DASHBOARD
-app.get("/dashboard", async (req, res) => {
-    try {
-        const numbers = await getAllNumbers();
-
-        const rows = numbers.map(item => `
-            <tr>
-                <td>${item.number}</td>
-                <td>WhatsApp-compatible format</td>
-            </tr>
-        `).join("");
-
-        res.send(`
-            <!DOCTYPE html>
-            <html>
-            <head>
-                <title>Saved Numbers</title>
-                <meta name="viewport" content="width=device-width, initial-scale=1">
-                <style>
-                    body {
-                        font-family: Arial;
-                        background: #101820;
-                        color: white;
-                        padding: 20px;
-                    }
-                    h1 { color: #25d366; }
-                    .card {
-                        background: #1c2935;
-                        padding: 20px;
-                        border-radius: 12px;
-                        margin-bottom: 20px;
-                    }
-                    table {
-                        width: 100%;
-                        border-collapse: collapse;
-                    }
-                    td, th {
-                        padding: 13px;
-                        border-bottom: 1px solid #34495e;
-                        text-align: left;
-                    }
-                    th { color: #25d366; }
-                </style>
-            </head>
-            <body>
-                <h1>Saved Numbers</h1>
-
-                <div class="card">
-                    <h2>Total: ${numbers.length}</h2>
-                    <p>WhatsApp Number Storage API</p>
-                </div>
-
-                <div class="card">
-                    <table>
-                        <thead>
-                            <tr>
-                                <th>Phone Number</th>
-                                <th>Format</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            ${rows || "<tr><td colspan='2'>No numbers saved.</td></tr>"}
-                        </tbody>
-                    </table>
-                </div>
-            </body>
-            </html>
-        `);
-
-    } catch (error) {
-        res.status(500).send("Failed to load saved numbers.");
-    }
-});
-
-// API 404
-app.use("/api", (req, res) => {
-    res.status(404).json({
+    // 404
+    return res.status(404).json({
         status: false,
         statusCode: 404,
         creator: CREATOR,
         message: "API endpoint not found.",
-        path: req.originalUrl
+        path: pathname
     });
-});
-
-// EXPORT
-export default app;
+};
