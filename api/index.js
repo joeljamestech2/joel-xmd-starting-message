@@ -1,15 +1,14 @@
-
+const { Storage } = require("megajs");
 
 const CREATOR = "API Developer";
 
-// GITHUB CONFIGURATION
-const GITHUB_OWNER = "joeljamestech";
-const GITHUB_REPO = "joel-xmd-starting-message";
-const GITHUB_TOKEN = "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";
-const GITHUB_BRANCH = "main";
+// MEGA CONFIGURATION
+const MEGA_EMAIL = "rastadeconcave@gmail.com";
+const MEGA_PASSWORD = "##2005rasta1234";
 
-const GITHUB_FILE = "data/numbers.json";
-const API_URL = "https://api.github.com";
+const MEGA_FILE = "numbers.json";
+
+// NUMBER HELPERS
 function cleanNumber(value) {
     return String(value || "").replace(/[+\s()-]/g, "");
 }
@@ -18,143 +17,72 @@ function validNumber(number) {
     return /^\d{8,15}$/.test(number);
 }
 
-// GITHUB CONFIGURATION
-function checkConfig() {
-    if (!GITHUB_OWNER || !GITHUB_REPO || !GITHUB_TOKEN) {
-        throw new Error("GitHub storage configuration is incomplete.");
-    }
-}
-
-// GITHUB REQUEST
-async function githubRequest(url, options = {}) {
-    const response = await fetch(url, {
-        ...options,
-        headers: {
-            Authorization: `Bearer ${GITHUB_TOKEN}`,
-            Accept: "application/vnd.github+json",
-            "X-GitHub-Api-Version": "2022-11-28",
-            "Content-Type": "application/json",
-            ...options.headers
-        }
-    });
-
-    const data = await response.json().catch(() => ({}));
-
-    if (!response.ok) {
-        const error = new Error(
-            data.message || "GitHub storage request failed."
-        );
-
-        error.status = response.status;
-        throw error;
+// CONNECT TO MEGA
+async function connectMega() {
+    if (!MEGA_EMAIL || !MEGA_PASSWORD) {
+        throw new Error("MEGA configuration is incomplete.");
     }
 
-    return data;
+    return await new Storage({
+        email: MEGA_EMAIL,
+        password: MEGA_PASSWORD,
+        keepalive: false,
+        autoload: true
+    }).ready;
 }
 
-// FILE URL
-function getFileURL() {
-    const file = GITHUB_FILE
-        .split("/")
-        .map(encodeURIComponent)
-        .join("/");
-
-    return `${API_URL}/repos/${encodeURIComponent(GITHUB_OWNER)}/${encodeURIComponent(GITHUB_REPO)}/contents/${file}`;
+// FIND FILE
+function findNumbersFile(storage) {
+    return storage.files.find(
+        file => file.name === MEGA_FILE && file.directory === false
+    );
 }
 
 // READ NUMBERS
-async function readNumbers() {
-    checkConfig();
+async function readNumbers(storage) {
+    const file = findNumbersFile(storage);
 
-    try {
-        const url = `${getFileURL()}?ref=${encodeURIComponent(GITHUB_BRANCH)}`;
-
-        const file = await githubRequest(url);
-
-        const content = Buffer.from(
-            file.content.replace(/\s/g, ""),
-            "base64"
-        ).toString("utf8");
-
-        const numbers = JSON.parse(content);
-
-        if (!Array.isArray(numbers)) {
-            throw new Error("Invalid numbers storage format.");
-        }
-
-        return {
-            numbers,
-            sha: file.sha
-        };
-
-    } catch (error) {
-        if (error.status === 404) {
-            return {
-                numbers: [],
-                sha: null
-            };
-        }
-
-        throw error;
+    if (!file) {
+        return [];
     }
+
+    const buffer = await file.downloadBuffer();
+    const numbers = JSON.parse(buffer.toString("utf8"));
+
+    if (!Array.isArray(numbers)) {
+        throw new Error("Invalid numbers storage format.");
+    }
+
+    return numbers;
 }
 
 // WRITE NUMBERS
-async function writeNumbers(numbers, sha) {
-    checkConfig();
-
+async function writeNumbers(storage, numbers) {
     const content = Buffer.from(
-        JSON.stringify(numbers, null, 2)
-    ).toString("base64");
+        JSON.stringify(numbers, null, 2),
+        "utf8"
+    );
 
-    const body = {
-        message: "Update saved phone numbers",
-        content,
-        branch: GITHUB_BRANCH
-    };
+    const oldFile = findNumbersFile(storage);
 
-    if (sha) {
-        body.sha = sha;
+    // Upload new file
+    const uploaded = await storage.upload(
+        MEGA_FILE,
+        content
+    ).complete;
+
+    // Remove previous file after successful upload
+    if (oldFile && oldFile.nodeId !== uploaded.nodeId) {
+        await oldFile.delete();
     }
 
-    return githubRequest(getFileURL(), {
-        method: "PUT",
-        body: JSON.stringify(body)
-    });
+    return true;
 }
 
-// UPDATE WITH CONFLICT RETRIES
-async function updateNumbers(callback) {
-    for (let attempt = 0; attempt < 5; attempt++) {
-        const { numbers, sha } = await readNumbers();
-
-        const result = callback(numbers);
-
-        if (!result.changed) {
-            return result.value;
-        }
-
-        try {
-            await writeNumbers(result.numbers, sha);
-            return result.value;
-
-        } catch (error) {
-            if (
-                (error.status === 409 || error.status === 422) &&
-                attempt < 4
-            ) {
-                continue;
-            }
-
-            throw error;
-        }
-    }
-
-    throw new Error("Unable to update number storage.");
-}
-
-// RESPONSE HELPER
+// ERROR HANDLER
 function sendError(res, message, error) {
+    console.error("MEGA ERROR:", error);
+
     return res.status(500).json({
         status: false,
         statusCode: 500,
@@ -177,7 +105,7 @@ module.exports = async (req, res) => {
             statusCode: 200,
             creator: CREATOR,
             name: "WhatsApp Number Storage API",
-            storage: "GitHub JSON",
+            storage: "MEGA Cloud Storage",
             endpoints: {
                 upload: {
                     method: "GET",
@@ -202,9 +130,14 @@ module.exports = async (req, res) => {
     // UPLOAD NUMBER
     if (
         method === "GET" &&
-        (pathname === "/api/upload" || pathname === "/hapi/upload")
+        (
+            pathname === "/api/upload" ||
+            pathname === "/hapi/upload"
+        )
     ) {
-        const number = cleanNumber(url.searchParams.get("number"));
+        const number = cleanNumber(
+            url.searchParams.get("number")
+        );
 
         if (!validNumber(number)) {
             return res.status(400).json({
@@ -215,31 +148,35 @@ module.exports = async (req, res) => {
             });
         }
 
-        try {
-            const saved = await updateNumbers(numbers => {
-                if (numbers.includes(number)) {
-                    return {
-                        changed: false,
-                        value: false
-                    };
-                }
+        let storage;
 
-                return {
-                    changed: true,
-                    numbers: [...numbers, number],
-                    value: true
-                };
-            });
+        try {
+            storage = await connectMega();
+
+            const numbers = await readNumbers(storage);
+
+            if (numbers.includes(number)) {
+                return res.status(200).json({
+                    status: true,
+                    statusCode: 200,
+                    creator: CREATOR,
+                    number,
+                    saved: false,
+                    message: "Number already exists."
+                });
+            }
+
+            numbers.push(number);
+
+            await writeNumbers(storage, numbers);
 
             return res.status(200).json({
                 status: true,
                 statusCode: 200,
                 creator: CREATOR,
                 number,
-                saved,
-                message: saved
-                    ? "Number saved successfully."
-                    : "Number already exists."
+                saved: true,
+                message: "Number saved successfully."
             });
 
         } catch (error) {
@@ -248,13 +185,20 @@ module.exports = async (req, res) => {
                 "Failed to save number.",
                 error
             );
+
+        } finally {
+            if (storage) storage.close();
         }
     }
 
     // RETRIEVE OR CHECK NUMBERS
     if (method === "GET" && pathname === "/api/numbers") {
+        let storage;
+
         try {
-            const { numbers } = await readNumbers();
+            storage = await connectMega();
+
+            const numbers = await readNumbers(storage);
 
             // CHECK NUMBER
             if (url.searchParams.has("number")) {
@@ -285,7 +229,7 @@ module.exports = async (req, res) => {
                 });
             }
 
-            // RETRIEVE ALL NUMBERS
+            // RETRIEVE ALL
             return res.status(200).json({
                 status: true,
                 statusCode: 200,
@@ -300,6 +244,9 @@ module.exports = async (req, res) => {
                 "Failed to retrieve numbers.",
                 error
             );
+
+        } finally {
+            if (storage) storage.close();
         }
     }
 
@@ -318,31 +265,37 @@ module.exports = async (req, res) => {
             });
         }
 
-        try {
-            const deleted = await updateNumbers(numbers => {
-                if (!numbers.includes(number)) {
-                    return {
-                        changed: false,
-                        value: false
-                    };
-                }
+        let storage;
 
-                return {
-                    changed: true,
-                    numbers: numbers.filter(n => n !== number),
-                    value: true
-                };
-            });
+        try {
+            storage = await connectMega();
+
+            const numbers = await readNumbers(storage);
+
+            if (!numbers.includes(number)) {
+                return res.status(200).json({
+                    status: true,
+                    statusCode: 200,
+                    creator: CREATOR,
+                    number,
+                    deleted: false,
+                    message: "Number not found."
+                });
+            }
+
+            const updatedNumbers = numbers.filter(
+                n => n !== number
+            );
+
+            await writeNumbers(storage, updatedNumbers);
 
             return res.status(200).json({
                 status: true,
                 statusCode: 200,
                 creator: CREATOR,
                 number,
-                deleted,
-                message: deleted
-                    ? "Number deleted successfully."
-                    : "Number not found."
+                deleted: true,
+                message: "Number deleted successfully."
             });
 
         } catch (error) {
@@ -351,6 +304,9 @@ module.exports = async (req, res) => {
                 "Failed to delete number.",
                 error
             );
+
+        } finally {
+            if (storage) storage.close();
         }
     }
 
