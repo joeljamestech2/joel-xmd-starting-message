@@ -1,4 +1,4 @@
-require("dotenv").config();
+
 const CREATOR = "API Developer";
 
 const GITHUB_OWNER = process.env.GITHUB_OWNER;
