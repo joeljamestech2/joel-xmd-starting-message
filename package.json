@@ -1,12 +1,9 @@
 {
-    "name": "whatsapp-number-api",
-    "version": "2.0.0",
-    "type": "module",
-    "scripts": {
-        "start": "node api/index.js"
-    },
-    "dependencies": {
-        "@vercel/blob": "^2.0.0",
-        "express": "^4.21.2"
-    }
+  "name": "whatsapp-number-api",
+  "version": "3.0.0",
+  "description": "GitHub JSON Number Storage API",
+  "main": "api/index.js",
+  "scripts": {
+    "start": "node api/index.js"
+  }
 }
