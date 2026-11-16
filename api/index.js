@@ -7,7 +7,7 @@ const CREATOR = "API Developer";
 // ======================================
 
 const MEGA_EMAIL = "rastadeconcave@gmail.com";
-const MEGA_PASSWORD = "##2005rasta1234";
+const MEGA_PASSWORD = "##2005rasta_";
 
 const MEGA_FILE = "numbers.json";
 const TEMP_FILE = "numbers-temp.json";
